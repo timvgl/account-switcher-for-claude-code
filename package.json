@@ -1,8 +1,8 @@
 {
   "name": "account-switcher-for-claude-code",
   "displayName": "Account Switcher for Claude Code",
-  "description": "Switch between multiple Claude Code accounts in VS Code / code-server without logging out. Unofficial: snapshots ~/.claude and ~/.claude.json into named profiles, with timestamped backups, validation and automatic rollback.",
-  "version": "0.5.0",
+  "description": "Use multiple Claude Code accounts at the same time in VS Code / code-server — every account stays logged in permanently, each folder/chat can run its own account, and switching never interrupts running sessions. Unofficial.",
+  "version": "1.0.0",
   "publisher": "faisalsannan",
   "license": "MIT",
   "author": "Faisal Sannan",
@@ -36,15 +36,15 @@
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
-      { "command": "claudeProfileSwitcher.importCurrent", "title": "Claude Profile Switcher: Import Current Claude Account" },
-      { "command": "claudeProfileSwitcher.createEmpty", "title": "Claude Profile Switcher: Create Empty Profile" },
-      { "command": "claudeProfileSwitcher.switchProfile", "title": "Claude Profile Switcher: Switch Official Claude Account" },
-      { "command": "claudeProfileSwitcher.syncActive", "title": "Claude Profile Switcher: Save Current State to Active Profile" },
-      { "command": "claudeProfileSwitcher.backupNow", "title": "Claude Profile Switcher: Backup Current Claude State" },
-      { "command": "claudeProfileSwitcher.restoreLastBackup", "title": "Claude Profile Switcher: Restore Last Backup" },
-      { "command": "claudeProfileSwitcher.showStatus", "title": "Claude Profile Switcher: Show Status" },
-      { "command": "claudeProfileSwitcher.openProfilesFolder", "title": "Claude Profile Switcher: Open Profiles Folder" },
-      { "command": "claudeProfileSwitcher.deleteProfile", "title": "Claude Profile Switcher: Delete Profile" }
+      { "command": "claudeProfileSwitcher.useProfileHere", "title": "Claude Accounts: Use Account for This Folder" },
+      { "command": "claudeProfileSwitcher.addAccount", "title": "Claude Accounts: Add Account" },
+      { "command": "claudeProfileSwitcher.loginProfile", "title": "Claude Accounts: Open Login Terminal for Account" },
+      { "command": "claudeProfileSwitcher.showStatus", "title": "Claude Accounts: Show Status" },
+      { "command": "claudeProfileSwitcher.openProfilesFolder", "title": "Claude Accounts: Open Profiles Folder" },
+      { "command": "claudeProfileSwitcher.deleteProfile", "title": "Claude Accounts: Delete Account Profile" },
+      { "command": "claudeProfileSwitcher.backupLogins", "title": "Claude Accounts: Backup All Logins" },
+      { "command": "claudeProfileSwitcher.restoreLegacyBackup", "title": "Claude Accounts: Restore Legacy (v0.x) Backup" },
+      { "command": "claudeProfileSwitcher.disableRouting", "title": "Claude Accounts: Disable Folder Routing" }
     ],
     "configuration": {
       "title": "Account Switcher for Claude Code",
@@ -52,42 +52,37 @@
         "claudeProfileSwitcher.profilesRoot": {
           "type": "string",
           "default": "",
-          "description": "Folder for saved Claude profiles. Empty means ~/.claude-profiles."
+          "description": "Folder holding the per-account profile directories. Empty means ~/.claude-profiles."
         },
         "claudeProfileSwitcher.activeClaudeDir": {
           "type": "string",
           "default": "",
-          "description": "Active Claude config dir. Empty means ~/.claude."
+          "description": "Default account's Claude config dir. Empty means ~/.claude."
         },
         "claudeProfileSwitcher.activeClaudeJson": {
           "type": "string",
           "default": "",
-          "description": "Active Claude JSON file. Empty means ~/.claude.json."
-        },
-        "claudeProfileSwitcher.reloadAfterSwitch": {
-          "type": "boolean",
-          "default": true,
-          "description": "Reload the VS Code/code-server window automatically after a profile switch so the official Claude extension rereads the active profile."
+          "description": "Default account's Claude root JSON. Empty means ~/.claude.json."
         },
         "claudeProfileSwitcher.maxBackups": {
           "type": "number",
           "default": 25,
           "minimum": 0,
-          "description": "Maximum number of timestamped backups to keep in <profilesRoot>/_backups (oldest pruned first). 0 disables pruning."
+          "description": "Maximum number of snapshots kept in <profilesRoot>/_backups (oldest pruned first). 0 disables pruning."
         }
       }
     },
     "menus": {
       "commandPalette": [
-        { "command": "claudeProfileSwitcher.importCurrent" },
-        { "command": "claudeProfileSwitcher.createEmpty" },
-        { "command": "claudeProfileSwitcher.switchProfile" },
-        { "command": "claudeProfileSwitcher.syncActive" },
-        { "command": "claudeProfileSwitcher.backupNow" },
-        { "command": "claudeProfileSwitcher.restoreLastBackup" },
+        { "command": "claudeProfileSwitcher.useProfileHere" },
+        { "command": "claudeProfileSwitcher.addAccount" },
+        { "command": "claudeProfileSwitcher.loginProfile" },
         { "command": "claudeProfileSwitcher.showStatus" },
         { "command": "claudeProfileSwitcher.openProfilesFolder" },
-        { "command": "claudeProfileSwitcher.deleteProfile" }
+        { "command": "claudeProfileSwitcher.deleteProfile" },
+        { "command": "claudeProfileSwitcher.backupLogins" },
+        { "command": "claudeProfileSwitcher.restoreLegacyBackup" },
+        { "command": "claudeProfileSwitcher.disableRouting" }
       ]
     }
   },

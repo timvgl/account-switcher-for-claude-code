@@ -5,182 +5,196 @@
 [![Open VSX](https://img.shields.io/open-vsx/v/faisalsannan/account-switcher-for-claude-code?label=Open%20VSX&color=2b2a33)](https://open-vsx.org/extension/faisalsannan/account-switcher-for-claude-code)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-**Switch between multiple official Claude Code accounts in VS Code / code-server — without logging out of any of them.**
+**Run multiple Claude Code accounts at the same time in VS Code / code-server.
+Every account stays logged in permanently. Each folder — and each new chat —
+can use its own account. Switching never logs anything out and never
+interrupts a running session.**
 
-## Install
+## What changed in v1.0
 
-- **VS Code:** search "Account Switcher for Claude Code" in the Extensions panel, or install from the
-  [Marketplace](https://marketplace.visualstudio.com/items?itemName=faisalsannan.account-switcher-for-claude-code).
-- **code-server / VSCodium:** install from
-  [Open VSX](https://open-vsx.org/extension/faisalsannan/account-switcher-for-claude-code).
-- **Manual:** download the `.vsix` from
-  [Releases](https://github.com/FaisalSannan/account-switcher-for-claude-code/releases)
-  and use *Extensions: Install from VSIX…*.
+v0.x kept one account live at a time and *swapped* `~/.claude` snapshots on
+every switch: window reloads, stale chat tabs, and snapshots whose tokens
+expired while another account was live.
 
-Each account's local state (`~/.claude/` and
-`~/.claude.json`) is snapshotted into a named profile; switching swaps the
-live state atomically and reloads the window.
+v1.0 removes the swapping entirely:
+
+- **Every account is permanently live** in its own isolated config directory
+  (`CLAUDE_CONFIG_DIR`). Logins are never moved, copied or replaced, so they
+  cannot go stale and there is **no logout code path at all** — a reboot or VM
+  shutdown cannot sign any account out.
+- **"Switching" is just routing**: you choose which account **new** chats in a
+  folder use. Chats that are already running keep their process and their
+  account — different accounts genuinely run **concurrently**, side by side.
+- **No window reloads.** Open a new chat and it's on the other account.
+- Works for the Claude panel (GUI), the `claude` CLI in terminals, and both at
+  once.
+
+Profiles created with v0.x are migrated automatically on first activation
+(details below) — stored logins are preserved.
 
 > ## ⚠️ Warning — unofficial tool
-> This extension is **not made or endorsed by Anthropic**. It works by
-> copying and swapping the official Claude extension's local state files
-> (`~/.claude` and `~/.claude.json`), which include OAuth credentials,
-> sessions and settings. Use it at your own risk, for private use.
+> This extension is **not made or endorsed by Anthropic**. It works with the
+> official Claude Code extension's documented `CLAUDE_CONFIG_DIR` mechanism
+> and its `claudeCode.claudeProcessWrapper` setting. It never edits, prints or
+> logs tokens, and it never modifies the Anthropic extension itself.
 >
-> - It never modifies the Anthropic extension itself.
-> - It never edits, prints or logs tokens — files are only copied as-is.
-> - Every state change is preceded by a timestamped backup.
-> - Profile snapshots contain **login credentials**. The profiles folder is
->   created with `700` permissions — do not commit it, sync it, or loosen it.
+> Profile directories contain **login credentials** (exactly like `~/.claude`
+> does). The profiles folder is created with `700` permissions — do not commit
+> it, sync it, or loosen it.
 
 ## How it works
 
 ```
+~/.claude                       # your original account — untouched, now the
+~/.claude.json                  # "default" profile
 ~/.claude-profiles/
-├── active-profile.json        # which profile is currently live
-├── Main/
-│   ├── profile.json           # metadata (name, createdAt, lastSavedAt)
-│   ├── .claude/               # snapshot of ~/.claude
-│   └── .claude.json           # snapshot of ~/.claude.json
-├── Work/
+├── map.conf                    # folder → account routing (longest prefix wins)
+├── _default.label              # optional display name for the default account
+├── Work/                       # a complete, live CLAUDE_CONFIG_DIR:
+│   ├── .credentials.json       #   this account's own login (never moved)
+│   ├── .claude.json            #   its own account state & workspace trust
+│   ├── settings.json           #   its own settings (seeded from default)
+│   ├── profile.json            #   metadata for this extension
+│   └── projects/ sessions/ …   #   its own history, fully isolated
+├── Personal/
 │   └── ...
-└── _backups/
-    └── 2026-06-11T12-00-00-000Z-switch-to-Work/
-        ├── backup.json        # reason, time, active profile at the time
-        ├── .claude/
-        └── .claude.json
+├── _bin/
+│   ├── claude-wrapper.sh       # tiny launcher the official extension calls
+│   ├── profile-env.sh          # the routing logic (also usable in terminals)
+│   └── resolve.log             # routing breadcrumbs (paths only, no secrets)
+└── _backups/                   # login snapshots & legacy v0.x backups
 ```
 
-A switch does, in order:
+When the official Claude extension (or a terminal launcher) starts a new
+Claude process, the wrapper picks the account for it:
 
-1. **Validate** the target profile (folder exists, JSON parses, credentials
-   file has a usable shape — values are never read into logs or UI).
-2. **Save** the live state into the currently active profile.
-3. **Back up** the live state to `_backups/<timestamp>-switch-to-<name>/`.
-4. **Swap**: the target snapshot is copied to staging paths next to
-   `~/.claude`, then moved into place with `rename()` (atomic on the same
-   filesystem). If any step fails, all completed renames are undone and the
-   previous state is left intact.
-5. **Enforce permissions**: `~/.claude` → `700`, `~/.claude.json` and
-   `~/.claude/.credentials.json` → `600`.
-6. **Reload** the window so the official Claude extension rereads the state.
+1. `CLAUDE_CONFIG_DIR` already set in the environment → respected untouched
+2. `CLAUDE_PROFILE=<name>` in the environment → that profile
+3. a `.claude-profile` file in the folder (or any parent up to `~`) → that profile
+4. longest matching folder prefix in `map.conf` → that profile
+5. otherwise → the default account (`~/.claude`)
+
+Routing picks a directory for a **new** process and nothing else: no files
+move, no tokens are read, nothing is logged in or out. That is why a switch
+can never break a session that is already running — that session's process
+keeps its own config directory until it exits.
 
 ## Full usage guide
 
+### First-time setup (adding a second account)
+
+1. `Ctrl+Shift+P` → **Claude Accounts: Add Account** → name it (e.g. `Work`).
+2. A terminal opens for that profile — complete the login there with the
+   second account (type `/login` if not prompted). Close the terminal when
+   done. **That's the only login this profile will ever need**: it survives
+   switches, reboots and shutdowns.
+3. When asked, enable **folder routing** (one-time consent — it sets the
+   official extension's `claudeCode.claudeProcessWrapper` setting to the
+   wrapper script above).
+
+### Day-to-day switching
+
+- **Click the status bar item** (`👤 Claude: <account>`, bottom left) or run
+  **Claude Accounts: Use Account for This Folder**, and pick the account.
+- New chats in that folder now use it. **Chats already running are not
+  touched** — they finish on the account they started with. No reload.
+- Route different folders to different accounts and they all run at the same
+  time, each with its own history and its own login.
+
+### Per-project pinning (optional)
+
+Put a `.claude-profile` file containing a profile name in any project folder:
+
+```
+Work
+```
+
+That folder (and everything under it) uses the `Work` account, overriding
+`map.conf`. Commit it to the repo if the whole team convention is yours alone;
+otherwise gitignore it.
+
+### Terminals / CLI
+
+The same routing works for the `claude` CLI if your launcher sources the
+helper (add once to `.bashrc` or a launcher script):
+
+```bash
+[ -f ~/.claude-profiles/_bin/profile-env.sh ] && . ~/.claude-profiles/_bin/profile-env.sh && claude_profile_apply
+exec claude "$@"   # or just run `claude` after the two lines above
+```
+
+Or bypass routing explicitly for one command / one shell:
+
+```bash
+CLAUDE_PROFILE=Work claude          # one command on the Work account
+export CLAUDE_PROFILE=Work          # whole shell on the Work account
+```
+
+Ongoing terminal sessions are processes too — starting a new one on another
+account never disturbs them.
+
 ### Knowing which account you're on
 
-After installing and reloading, look at the **bottom-left status bar** of
-VS Code / code-server. You'll see the active profile at all times:
+- The **status bar** shows the account that new chats in the current folder
+  will use: `👤 Claude: Work`.
+- **Claude Accounts: Show Status** lists every account, its email, login
+  state, and which folders route to it.
+- `~/.claude-profiles/_bin/resolve.log` records the last few hundred routing
+  decisions (folder → profile; never any secrets) if you want to verify.
 
-```
-👤 Claude: Main
-```
+## Migration from v0.x
 
-- `Claude: <name>` — this account's state is currently live.
-- `Claude: no profile` — no profile imported yet (see first-time setup below).
+On first activation v1.0 automatically:
 
-You can also run **Claude Profile Switcher: Show Status** from the Command
-Palette (`Ctrl+Shift+P`) for the full picture: active profile, all profiles,
-backup count and the exact paths in use.
+- Detects v0.x snapshot profiles (`<profile>/.claude/…`).
+- The profile that was **active** keeps living at `~/.claude` (that was always
+  its real, current state). Its name becomes the default account's display
+  label; its stale snapshot is archived under `_backups/`.
+- Every **other** profile is converted in place into a live config dir — its
+  stored login is preserved (login files are backed up under `_backups/`
+  first). If the stored token already expired while it sat unused, one
+  `/login` in its login terminal fixes it permanently.
+- Names with spaces are renamed (`My Account` → `My-Account`), since v1 names
+  travel through environment variables and the map file.
 
-### Switching accounts (day-to-day)
-
-1. **Click `Claude: <name>` in the bottom-left status bar**
-   (or `Ctrl+Shift+P` → *Claude Profile Switcher: Switch Official Claude Account*).
-2. Pick the account you want from the menu. The currently active one is
-   marked `● active now`.
-3. Confirm the dialog. The extension saves your current account's state,
-   takes a backup, swaps the files, and **reloads the window automatically**.
-4. After the reload the Claude panel is on the other account — the status
-   bar now shows its name.
-
-> **Important: start a New Chat after switching.**
-> Conversations belong to the account that created them. If a chat tab from
-> the previous account is still open and you type into it, you'll get
-> `No conversation found with session ID: …`. That's not a bug — it means
-> sessions are correctly isolated per account. Click the **＋ (New Chat)**
-> button in the Claude panel instead. Your old conversations come back
-> whenever you switch to the profile they belong to.
-
-### First-time setup (registering your accounts)
-
-1. While logged in with account 1: `Ctrl+Shift+P` →
-   **Import Current Claude Account** → name it (e.g. `Main`).
-   The status bar now shows `Claude: Main`.
-2. **Create Empty Profile** → name it (e.g. `Work`).
-3. **Switch** to `Work` (status bar → pick `Work`). The window reloads and
-   the Claude panel shows a login screen — account 1 is safely stored in its
-   profile, not logged out.
-4. Log in to the Claude panel with account 2.
-5. Run **Save Current State to Active Profile** once, so the login is
-   captured into `Work`.
-6. Done. From now on switching is a single click on the status bar, and both
-   accounts stay logged in permanently. Repeat steps 2–5 for any third
-   account.
-
-### Rules of thumb
-
-- **After every switch → New Chat** (don't reuse a stale conversation tab).
-- **Let running Claude tasks finish before switching**, so the snapshot
-  isn't taken mid-write.
-- **After logging in or changing Claude settings**, run
-  *Save Current State to Active Profile* so the profile snapshot is current
-  (switching also saves automatically — this is only for extra safety).
-- **Something broke?** Run *Restore Last Backup*. Every switch keeps a
-  timestamped backup automatically.
+Old v0.x full backups remain usable via
+**Claude Accounts: Restore Legacy (v0.x) Backup**.
 
 ## Commands (Command Palette)
 
 | Command | What it does |
 |---|---|
-| Import Current Claude Account | Save the currently logged-in account as a new named profile and mark it active |
-| Create Empty Profile | Create a profile with no state; switch to it, reload, then log in with the second account |
-| Switch Official Claude Account | Pick a profile; saves + backs up current state, swaps, reloads |
-| Save Current State to Active Profile | Re-snapshot the live state into the active profile |
-| Backup Current Claude State | Manual timestamped backup |
-| Restore Last Backup | Restore the most recent backup (takes a fresh `pre-restore` backup first) |
-| Show Status | Active profile, profile list, paths, backup count |
+| Use Account for This Folder | Route new chats in a folder to an account (status-bar click does the same) |
+| Add Account | Create a new always-logged-in profile and open its one-time login terminal |
+| Open Login Terminal for Account | Re-open a login terminal (first login, or if a token expired unused) |
+| Show Status | Every account: email, login state, routed folders, routing health |
+| Backup All Logins | Snapshot every profile's login files into `_backups/` |
+| Delete Account Profile | Remove a profile directory (takes a login snapshot first; the account itself is untouched) |
+| Restore Legacy (v0.x) Backup | Disaster recovery for old swap-model backups |
+| Disable Folder Routing | Clear the `claudeProcessWrapper` setting (logins are untouched) |
 | Open Profiles Folder | Open/copy the profiles folder path |
-| Delete Profile | Delete a non-active profile's snapshot |
-
-The status bar shows the active profile (e.g. `Claude: Main`); clicking it
-opens the switch menu.
 
 ## Recovery instructions
 
-If anything goes wrong (interrupted switch, wrong account, corrupted state):
-
-1. **From VS Code:** run `Claude Profile Switcher: Restore Last Backup`.
-2. **Manually** (terminal), pick the newest folder in
-   `~/.claude-profiles/_backups/` and restore it:
-
-   ```bash
-   ls ~/.claude-profiles/_backups/            # newest = last in list
-   B=~/.claude-profiles/_backups/<chosen-backup>
-   rm -rf ~/.claude ~/.claude.json
-   cp -a "$B/.claude"      ~/.claude        2>/dev/null || true
-   cp -a "$B/.claude.json" ~/.claude.json   2>/dev/null || true
-   chmod 700 ~/.claude
-   chmod 600 ~/.claude.json ~/.claude/.credentials.json 2>/dev/null || true
-   ```
-
-3. Reload the VS Code / code-server window.
-4. Worst case (no usable backup): delete `~/.claude` and `~/.claude.json`
-   and log in to the Claude panel again. Nothing outside your home directory
-   is ever touched.
-
-Stray `~/.claude.staging-*` / `~/.claude.old-*` entries can only exist after
-a hard crash mid-swap; they are safe to delete after restoring a backup.
+- **A profile lost its login?** Run **Open Login Terminal for Account** and
+  `/login` once. Nothing else is affected.
+- **Accidentally deleted a profile?** Every deletion is preceded by a login
+  snapshot: copy `.credentials.json` and `.claude.json` from the newest
+  `_backups/<timestamp>-logins/<name>/` back into a re-created profile folder.
+- **Routing misbehaving?** Check `~/.claude-profiles/_bin/resolve.log`, or run
+  **Disable Folder Routing** — everything falls back to the default account
+  exactly as if the extension were not installed.
+- **v0.x state needed back?** **Restore Legacy (v0.x) Backup** restores a full
+  old snapshot into `~/.claude` (with a fresh safety backup first).
 
 ## Settings
 
 | Setting | Default | Description |
 |---|---|---|
-| `claudeProfileSwitcher.profilesRoot` | `~/.claude-profiles` | Where profiles and backups live |
-| `claudeProfileSwitcher.activeClaudeDir` | `~/.claude` | Live Claude config dir |
-| `claudeProfileSwitcher.activeClaudeJson` | `~/.claude.json` | Live Claude root JSON |
-| `claudeProfileSwitcher.reloadAfterSwitch` | `true` | Auto-reload the window after a switch |
-| `claudeProfileSwitcher.maxBackups` | `25` | Backups kept in `_backups` (oldest pruned; `0` = keep all) |
+| `claudeProfileSwitcher.profilesRoot` | `~/.claude-profiles` | Where profiles, routing and backups live |
+| `claudeProfileSwitcher.activeClaudeDir` | `~/.claude` | Default account's config dir |
+| `claudeProfileSwitcher.activeClaudeJson` | `~/.claude.json` | Default account's root JSON |
+| `claudeProfileSwitcher.maxBackups` | `25` | Snapshots kept in `_backups` (oldest pruned; `0` = keep all) |
 
 ## Build from source
 
@@ -203,8 +217,16 @@ find it too. ⭐
 
 ## Notes & limitations
 
-- VS Code/code-server is reloaded after a switch; unsaved editors prompt as usual.
-- Switching while a Claude task is actively writing to `~/.claude` can snapshot
-  a mid-write state; the backup taken before each switch covers this.
-- Profiles created by v0.2.0 of this extension (stored in extension global
-  storage) are migrated automatically to `~/.claude-profiles` on first run.
+- Routing needs a POSIX shell: Linux, macOS, code-server, or WSL. On plain
+  Windows, set `CLAUDE_CONFIG_DIR` per environment manually (profiles still
+  work — only the automatic per-folder routing needs the wrapper script).
+- A chat keeps the account it was **started** with; switching affects new
+  chats only (that's the feature — nothing running is ever interrupted).
+- Each profile has its own workspace-trust state. New profiles copy your
+  existing trust decisions and onboarding state (never credentials), so first
+  runs skip the dialogs.
+- Conversation history is per account by design. A folder's old conversations
+  reappear when its routing points back at the account that created them.
+- Usage limits, plans and rate limits are per account, as Anthropic defines
+  them. This tool only manages where each account's files live; make sure your
+  use of multiple accounts complies with Anthropic's terms of service.

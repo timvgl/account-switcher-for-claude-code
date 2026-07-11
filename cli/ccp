@@ -1,0 +1,316 @@
+#!/usr/bin/env bash
+# ccp — terminal companion for "Account Switcher for Claude Code" (v1 model).
+#
+# Every profile under ~/.claude-profiles/<Name> is a permanently-live, fully
+# isolated CLAUDE_CONFIG_DIR: its own OAuth login, settings, sessions and
+# history. Accounts are never logged out — "switching" only points NEW
+# processes at a different directory, so running sessions on other accounts
+# are never interrupted, and logins persist on disk across reboots and VM
+# shutdowns. There is deliberately no logout command.
+#
+# The default account is the original ~/.claude. The same map.conf and
+# .claude-profile routing used by the VSCode extension applies to terminal
+# launches that source ~/.claude-profiles/_bin/profile-env.sh.
+
+set -uo pipefail
+
+ROOT="$HOME/.claude-profiles"
+DEFAULT_DIR="$HOME/.claude"
+MAP="$ROOT/map.conf"
+LABEL_FILE="$ROOT/_default.label"
+
+NODE="$(command -v node || true)"
+[ -z "$NODE" ] && [ -x "$HOME/.local/node/bin/node" ] && NODE="$HOME/.local/node/bin/node"
+
+die() { echo "ccp: $*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+ccp — Claude Code multi-account profiles (all accounts stay logged in at
+      once; switching never touches another account's running sessions)
+
+  ccp list                     all profiles: account, login state, routing
+  ccp add <name> [--clean]     create a live profile (seeded with your
+                               settings, CLAUDE.md and workspace-trust
+                               decisions unless --clean)
+  ccp <name> [claude args...]  launch Claude Code under that profile
+  ccp run <name> [args...]     same, explicit form
+  ccp use <name>               point THIS shell at a profile (plain `claude`
+                               then uses it; shell-function form only)
+  ccp current                  which profile this shell is on
+  ccp dir <name>               print a profile's config directory
+  ccp map [<path> <name>]      route a folder to a profile (same map.conf the
+                               VSCode extension uses; 'default' removes)
+  ccp map --remove <path>      delete a folder route
+  ccp remove <name> [--yes]    delete a profile directory (login snapshot is
+                               taken first; asks to confirm)
+  ccp backup                   snapshot every profile's login files into
+                               ~/.claude-profiles/_backups/<ts>-logins/
+
+First login of a new profile:  ccp add work && ccp work   → /login once.
+That login lives only in that profile's directory and survives reboots.
+EOF
+}
+
+default_label() {
+  [ -f "$LABEL_FILE" ] && IFS= read -r REPLY < "$LABEL_FILE" && printf '%s' "$REPLY"
+}
+
+valid_name() {
+  case "$1" in
+    "" | *[!a-zA-Z0-9._-]* | [_.-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 64 ] || return 1
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    default) return 1 ;;
+  esac
+  return 0
+}
+
+is_default_name() {
+  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+    default) return 0 ;;
+  esac
+  [ -n "$1" ] && [ "$1" = "$(default_label)" ]
+}
+
+profile_dir() {
+  if is_default_name "$1"; then echo "$DEFAULT_DIR"; else echo "$ROOT/$1"; fi
+}
+
+profile_exists() {
+  is_default_name "$1" || [ -d "$ROOT/$1" ]
+}
+
+account_json() { # $1 = profile dir; the default account keeps its legacy home-root location
+  if [ "$1" = "$DEFAULT_DIR" ]; then echo "$HOME/.claude.json"; else echo "$1/.claude.json"; fi
+}
+
+json_field() { # $1 = file, $2 = JS expression over parsed object `d`; prints "-" on failure
+  if [ -z "$NODE" ] || [ ! -f "$1" ]; then echo "-"; return 0; fi
+  "$NODE" -e '
+    let v = "-";
+    try {
+      const d = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+      v = eval(process.argv[2]) ?? "-";
+    } catch (e) {}
+    console.log(v);
+  ' "$1" "$2" 2>/dev/null || echo "-"
+}
+
+all_profiles() {
+  echo default
+  [ -d "$ROOT" ] || return 0
+  local d n
+  for d in "$ROOT"/*/; do
+    [ -d "$d" ] || continue
+    n="$(basename "$d")"
+    case "$n" in _* | .*) continue ;; esac
+    echo "$n"
+  done
+}
+
+cmd_list() {
+  local active_dir="${CLAUDE_CONFIG_DIR:-$DEFAULT_DIR}" label
+  label="$(default_label)"
+  printf '%-16s %-34s %-24s %-7s %s\n' "PROFILE" "ACCOUNT" "LOGIN" "ACTIVE" "DIR"
+  local n dir email login plan mark shown
+  for n in $(all_profiles); do
+    dir="$(profile_dir "$n")"
+    email="$(json_field "$(account_json "$dir")" 'd.oauthAccount?.emailAddress')"
+    if [ -d "$dir/.claude" ]; then
+      login="legacy layout (migrate!)"
+    elif [ -f "$dir/.credentials.json" ]; then
+      plan="$(json_field "$dir/.credentials.json" 'd.claudeAiOauth?.subscriptionType')"
+      login="logged in ($plan)"
+    else
+      login="NOT logged in"
+    fi
+    mark=""
+    [ "$dir" = "$active_dir" ] && mark="*"
+    shown="$n"
+    [ "$n" = "default" ] && [ -n "$label" ] && shown="default ($label)"
+    printf '%-16s %-34s %-24s %-7s %s\n' "$shown" "$email" "$login" "$mark" "$dir"
+  done
+}
+
+cmd_add() {
+  local name="" clean=0 arg
+  for arg in "$@"; do
+    case "$arg" in
+      --clean) clean=1 ;;
+      -*) die "unknown flag for add: $arg" ;;
+      *) [ -n "$name" ] && die "add takes exactly one profile name"; name="$arg" ;;
+    esac
+  done
+  valid_name "$name" || die "invalid profile name '${name:-}' (letters, digits, . - _ ; no spaces; not 'default')"
+  is_default_name "$name" && die "'$name' is the default account"
+  [ -d "$ROOT/$name" ] && die "profile '$name' already exists"
+
+  local dir="$ROOT/$name"
+  mkdir -p "$dir"
+  chmod 700 "$ROOT" "$dir" 2>/dev/null || true
+
+  if [ "$clean" -eq 0 ]; then
+    [ -f "$DEFAULT_DIR/settings.json" ] && cp "$DEFAULT_DIR/settings.json" "$dir/settings.json"
+    [ -f "$DEFAULT_DIR/CLAUDE.md" ] && cp "$DEFAULT_DIR/CLAUDE.md" "$dir/CLAUDE.md"
+    # Seed onboarding + workspace-trust decisions (never credentials), matching
+    # the VSCode extension's createProfile().
+    if [ -n "$NODE" ] && [ -f "$HOME/.claude.json" ]; then
+      "$NODE" -e '
+        const fs = require("fs");
+        const src = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+        const out = {};
+        for (const k of ["hasCompletedOnboarding", "theme", "autoUpdaterStatus", "preferredNotifChannel"])
+          if (src[k] !== undefined) out[k] = src[k];
+        if (src.projects) {
+          out.projects = {};
+          for (const [p, v] of Object.entries(src.projects))
+            if (v && v.hasTrustDialogAccepted) out.projects[p] = { hasTrustDialogAccepted: true };
+        }
+        fs.writeFileSync(process.argv[2], JSON.stringify(out, null, 2));
+        fs.chmodSync(process.argv[2], 0o600);
+      ' "$HOME/.claude.json" "$dir/.claude.json"
+    fi
+  fi
+
+  printf '{\n  "name": "%s",\n  "createdAt": "%s",\n  "schemaVersion": 2\n}\n' \
+    "$name" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$dir/profile.json"
+
+  echo "Profile '$name' created at $dir"
+  echo "Log it in once with the account you want:"
+  echo "    ccp $name          # then /login inside"
+  echo "The login lives only inside this profile, survives reboots, and no other"
+  echo "profile or running session is affected."
+}
+
+cmd_run() {
+  local name="$1"; shift
+  profile_exists "$name" || die "no profile '$name' (see: ccp list)"
+  local claude_bin
+  claude_bin="$(command -v claude || true)"
+  [ -z "$claude_bin" ] && claude_bin="$HOME/.local/bin/claude"
+  if is_default_name "$name"; then
+    exec env -u CLAUDE_CONFIG_DIR -u CLAUDE_PROFILE "$claude_bin" "$@"
+  fi
+  exec env CLAUDE_CONFIG_DIR="$(profile_dir "$name")" CLAUDE_PROFILE="$name" "$claude_bin" "$@"
+}
+
+cmd_dir() {
+  local name="${1:-}"
+  [ -z "$name" ] && die "usage: ccp dir <profile>"
+  profile_exists "$name" || die "no profile '$name' (see: ccp list)"
+  profile_dir "$name"
+}
+
+cmd_remove() {
+  local name="${1:-}" confirm="${2:-}"
+  [ -z "$name" ] && die "usage: ccp remove <profile> [--yes]"
+  is_default_name "$name" && die "refusing to remove the default ~/.claude account"
+  valid_name "$name" || die "invalid profile name '$name'"
+  [ -d "$ROOT/$name" ] || die "no profile '$name'"
+  if [ "$confirm" != "--yes" ]; then
+    echo "This deletes profile '$name' from this machine, INCLUDING its stored login"
+    echo "and session history. (The account itself is untouched; you can re-add and"
+    echo "/login again any time. A login snapshot is taken first.)"
+    printf 'Type the profile name to confirm: '
+    local answer
+    read -r answer
+    [ "$answer" = "$name" ] || die "aborted"
+  fi
+  cmd_backup >/dev/null
+  rm -rf "${ROOT:?}/${name:?}"
+  if [ -f "$MAP" ]; then
+    awk -F'|' -v p="$name" '$2 != p' "$MAP" > "$MAP.tmp" && mv "$MAP.tmp" "$MAP"
+  fi
+  echo "Removed profile '$name' (login snapshot kept under $ROOT/_backups)."
+}
+
+cmd_map() {
+  if [ $# -eq 0 ]; then
+    echo "# folder -> profile routing ($MAP)"
+    if [ -f "$MAP" ]; then grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$MAP" || true; fi
+    return 0
+  fi
+  if [ "$1" = "--remove" ]; then
+    [ -n "${2:-}" ] || die "usage: ccp map --remove <path>"
+    local path
+    path="$(realpath -m "$2")"
+    [ -f "$MAP" ] || { echo "no routes yet"; return 0; }
+    awk -F'|' -v p="$path" '$1 != p' "$MAP" > "$MAP.tmp" && mv "$MAP.tmp" "$MAP"
+    echo "Unrouted $path"
+    return 0
+  fi
+  [ -n "${2:-}" ] || die "usage: ccp map <path> <profile>"
+  local path profile
+  path="$(realpath -m "$1")"
+  profile="$2"
+  is_default_name "$profile" || [ -d "$ROOT/$profile" ] || die "no profile '$profile' (see: ccp list)"
+  touch "$MAP"
+  awk -F'|' -v p="$path" '$1 != p' "$MAP" > "$MAP.tmp" && mv "$MAP.tmp" "$MAP"
+  if is_default_name "$profile"; then
+    echo "Routed $path back to the default account"
+  else
+    printf '%s|%s\n' "$path" "$profile" >> "$MAP"
+    echo "Routed $path -> $profile"
+  fi
+  echo "(applies to new terminal 'claude' runs and new VSCode chats in that folder;"
+  echo " running sessions are never touched)"
+}
+
+cmd_backup() {
+  local ts dest n dir copied
+  ts="$(date +%Y-%m-%dT%H-%M-%S)"
+  dest="$ROOT/_backups/$ts-logins"
+  mkdir -p "$dest"
+  chmod 700 "$ROOT/_backups" "$dest" 2>/dev/null || true
+  for n in $(all_profiles); do
+    dir="$(profile_dir "$n")"
+    copied=0
+    for f in "$dir/.credentials.json" "$dir/.claude/.credentials.json"; do
+      if [ -f "$f" ]; then mkdir -p "$dest/$n"; cp "$f" "$dest/$n/.credentials.json"; copied=1; break; fi
+    done
+    if [ -f "$(account_json "$dir")" ]; then
+      mkdir -p "$dest/$n"; cp "$(account_json "$dir")" "$dest/$n/.claude.json"; copied=1
+    fi
+    [ "$copied" -eq 1 ] && chmod 600 "$dest/$n"/* 2>/dev/null || true
+  done
+  printf '{\n  "dir": "%s",\n  "reason": "logins",\n  "createdAt": "%s"\n}\n' \
+    "$dest" "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > "$dest/backup.json"
+  echo "Login snapshot written to $dest (local disk only, mode 600)."
+}
+
+cmd_current() {
+  local dir="${CLAUDE_CONFIG_DIR:-$DEFAULT_DIR}" label
+  label="$(default_label)"
+  if [ "$dir" = "$DEFAULT_DIR" ]; then
+    echo "default${label:+ ($label)} ($DEFAULT_DIR)"
+  else
+    case "$dir" in
+      "$ROOT"/*) echo "$(basename "$dir") ($dir)" ;;
+      *) echo "custom ($dir)" ;;
+    esac
+  fi
+}
+
+cmd="${1:-help}"
+case "$cmd" in
+  list | ls | status) cmd_list ;;
+  add | new) shift; cmd_add "$@" ;;
+  remove | rm) shift; cmd_remove "$@" ;;
+  dir) shift; cmd_dir "$@" ;;
+  run) shift; [ $# -ge 1 ] || die "usage: ccp run <profile> [claude args...]"; cmd_run "$@" ;;
+  map) shift; cmd_map "$@" ;;
+  backup) shift; cmd_backup ;;
+  current) cmd_current ;;
+  use) die "'ccp use' works via the shell function — open a new terminal or run: source ~/.bash_aliases" ;;
+  help | -h | --help) usage ;;
+  *)
+    if profile_exists "$cmd"; then
+      shift
+      cmd_run "$cmd" "$@"
+    else
+      die "unknown command or profile '$cmd' (see: ccp help)"
+    fi
+    ;;
+esac
