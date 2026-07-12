@@ -6,3 +6,7 @@ tsconfig.json
 .vscodeignore
 *.vsix
 package-lock.json
+.gitignore
+.github/**
+PUBLISHING.md
+scripts/**
