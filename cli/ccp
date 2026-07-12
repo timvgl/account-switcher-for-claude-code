@@ -38,6 +38,7 @@ ccp — Claude Code multi-account profiles (all accounts stay logged in at
   ccp use <name>               point THIS shell at a profile (plain `claude`
                                then uses it; shell-function form only)
   ccp current                  which profile this shell is on
+  ccp whoami                   one line: profile — account email — config dir
   ccp dir <name>               print a profile's config directory
   ccp map [<path> <name>]      route a folder to a profile (same map.conf the
                                VSCode extension uses; 'default' removes)
@@ -293,6 +294,21 @@ cmd_current() {
   fi
 }
 
+cmd_whoami() { # one line: profile — account email — config dir (for this process)
+  local dir="${CLAUDE_CONFIG_DIR:-$DEFAULT_DIR}" name label email
+  label="$(default_label)"
+  if [ "$dir" = "$DEFAULT_DIR" ]; then
+    name="default${label:+ ($label)}"
+  else
+    case "$dir" in
+      "$ROOT"/*) name="$(basename "$dir")" ;;
+      *) name="custom" ;;
+    esac
+  fi
+  email="$(json_field "$(account_json "$dir")" 'd.oauthAccount?.emailAddress')"
+  echo "$name — $email — $dir"
+}
+
 cmd="${1:-help}"
 case "$cmd" in
   list | ls | status) cmd_list ;;
@@ -303,6 +319,7 @@ case "$cmd" in
   map) shift; cmd_map "$@" ;;
   backup) shift; cmd_backup ;;
   current) cmd_current ;;
+  whoami) cmd_whoami ;;
   use) die "'ccp use' works via the shell function — open a new terminal or run: source ~/.bash_aliases" ;;
   help | -h | --help) usage ;;
   *)
