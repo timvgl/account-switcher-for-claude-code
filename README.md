@@ -59,8 +59,8 @@ Profiles created with v0.x are migrated automatically on first activation
 ├── Personal/
 │   └── ...
 ├── _bin/
-│   ├── claude-wrapper.sh       # tiny launcher the official extension calls
-│   ├── profile-env.sh          # the routing logic (also usable in terminals)
+│   ├── claude-wrapper.sh/.exe  # OS-native launcher the official extension calls
+│   ├── profile-env.sh          # Linux/macOS terminal routing helper
 │   └── resolve.log             # routing breadcrumbs (paths only, no secrets)
 └── _backups/                   # login snapshots & legacy v0.x backups
 ```
@@ -215,11 +215,18 @@ This tool is free and open source. If it saves you time, you can
 extension maintained as Claude Code evolves. Stars on the repo help others
 find it too. ⭐
 
-## Notes & limitations
+## Windows support
 
-- Routing needs a POSIX shell: Linux, macOS, code-server, or WSL. On plain
-  Windows, set `CLAUDE_CONFIG_DIR` per environment manually (profiles still
-  work — only the automatic per-folder routing needs the wrapper script).
+The extension detects Windows automatically. On Windows it installs and uses
+its bundled native `claude-wrapper.exe`; on Linux, macOS, code-server, and WSL
+it uses the existing Bash wrapper. Both launchers apply the same folder map,
+`.claude-profile` files, `CLAUDE_PROFILE`, and `CLAUDE_CONFIG_DIR` precedence.
+
+Windows profile data defaults to `%USERPROFILE%\\.claude-profiles` and the
+default account remains `%USERPROFILE%\\.claude`. No WSL or Bash installation
+is needed for VS Code folder routing.
+
+## Notes & limitations
 - A chat keeps the account it was **started** with; switching affects new
   chats only (that's the feature — nothing running is ever interrupted).
 - Each profile has its own workspace-trust state. New profiles copy your

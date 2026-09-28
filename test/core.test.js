@@ -169,7 +169,9 @@ test('createProfile seeds settings/CLAUDE.md and trust — never credentials', a
   assert.strictEqual(info.schemaVersion, 2);
   const dir = path.join(p.profilesRoot, 'Work');
   assert.strictEqual(info.dir, dir);
-  assert.strictEqual(mode(dir), 0o700, 'profile dir should be 700');
+  if (process.platform !== 'win32') {
+    assert.strictEqual(mode(dir), 0o700, 'profile dir should be 700');
+  }
 
   // seeded copies from the default account
   assert.ok(fss.existsSync(path.join(dir, 'settings.json')));
@@ -365,13 +367,17 @@ test('helper scripts: rendered, wrapper executable, second materialize is a no-o
   }
 
   const writes = [];
-  const wrapperPath = await core.materializeHelperScripts(p, '9.9.9-test', (m) => writes.push(m));
+  const wrapperPath = await core.materializeHelperScripts(
+    p, '9.9.9-test', (m) => writes.push(m), { platform: 'linux' }
+  );
   const envShPath = path.join(p.profilesRoot, '_bin', 'profile-env.sh');
   assert.strictEqual(wrapperPath, path.join(p.profilesRoot, '_bin', 'claude-wrapper.sh'));
   assert.strictEqual(writes.length, 2, 'first call writes both scripts');
   assert.ok(fss.existsSync(envShPath));
   assert.ok(fss.existsSync(wrapperPath));
-  assert.ok(mode(wrapperPath) & 0o111, 'wrapper must be executable');
+  if (process.platform !== 'win32') {
+    assert.ok(mode(wrapperPath) & 0o111, 'wrapper must be executable');
+  }
   const wrapperTxt = await fs.readFile(wrapperPath, 'utf8');
   assert.ok(wrapperTxt.includes(path.resolve(p.profilesRoot)));
   assert.ok(!wrapperTxt.includes('__PROFILES_ROOT__') && !wrapperTxt.includes('__VERSION__'));
@@ -379,12 +385,91 @@ test('helper scripts: rendered, wrapper executable, second materialize is a no-o
   // idempotent: same version again rewrites nothing
   const before = [fss.statSync(envShPath).mtimeMs, fss.statSync(wrapperPath).mtimeMs];
   const rewrites = [];
-  await core.materializeHelperScripts(p, '9.9.9-test', (m) => rewrites.push(m));
+  await core.materializeHelperScripts(
+    p, '9.9.9-test', (m) => rewrites.push(m), { platform: 'linux' }
+  );
   const after = [fss.statSync(envShPath).mtimeMs, fss.statSync(wrapperPath).mtimeMs];
   assert.deepStrictEqual(rewrites, [], 'second call must not rewrite');
   assert.deepStrictEqual(after, before, 'mtimes unchanged on second call');
 });
 
+test('helper platform: Windows uses a native launcher and Linux keeps Bash', async () => {
+  assert.strictEqual(core.helperPlatform('win32'), 'windows');
+  assert.strictEqual(core.helperWrapperFileName('win32'), 'claude-wrapper.exe');
+  assert.strictEqual(core.helperPlatform('linux'), 'posix');
+  assert.strictEqual(core.helperWrapperFileName('linux'), 'claude-wrapper.sh');
+  assert.strictEqual(core.helperPlatform('darwin'), 'posix');
+
+  const p = subPaths('windows-helper');
+  await assert.rejects(
+    () => core.materializeHelperScripts(p, '9.9.9-test', log, { platform: 'win32' }),
+    /Windows routing launcher is missing/
+  );
+
+  const launcher = path.join(__dirname, '..', 'resources', 'windows', 'claude-wrapper.exe');
+  const writes = [];
+  const installed = await core.materializeHelperScripts(
+    p,
+    '9.9.9-test',
+    (m) => writes.push(m),
+    { platform: 'win32', windowsWrapperSource: launcher }
+  );
+  assert.strictEqual(installed, path.join(p.profilesRoot, '_bin', 'claude-wrapper.exe'));
+  assert.deepStrictEqual(await fs.readFile(installed), await fs.readFile(launcher));
+  assert.strictEqual(writes.length, 1, 'first Windows install writes the launcher');
+
+  const rewrites = [];
+  await core.materializeHelperScripts(
+    p,
+    '9.9.9-test',
+    (m) => rewrites.push(m),
+    { platform: 'win32', windowsWrapperSource: launcher }
+  );
+  assert.deepStrictEqual(rewrites, [], 'second Windows install is a no-op');
+});
+
+if (process.platform === 'win32') {
+  test('Windows launcher routes a Claude process and preserves its exit code', async () => {
+    const p = subPaths('windows-launcher');
+    const launcher = path.join(__dirname, '..', 'resources', 'windows', 'claude-wrapper.exe');
+    const wrapper = await core.materializeHelperScripts(p, '9.9.9-test', log, {
+      platform: 'win32', windowsWrapperSource: launcher
+    });
+    const workDir = path.join(p.profilesRoot, 'Work');
+    const personalDir = path.join(p.profilesRoot, 'Personal');
+    const mapped = path.join(sandbox, 'windows', 'mapped');
+    await fs.mkdir(workDir, { recursive: true });
+    await fs.mkdir(personalDir, { recursive: true });
+    await fs.mkdir(mapped, { recursive: true });
+    await core.setMapping(p, mapped, 'Work');
+
+    const env = { ...process.env };
+    delete env.CLAUDE_CONFIG_DIR;
+    delete env.CLAUDE_PROFILE;
+    const powershell = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+    const mappedOut = execFileSync(wrapper, [powershell, '-NoProfile', '-Command', 'Write-Output $env:CLAUDE_CONFIG_DIR'], {
+      cwd: mapped, encoding: 'utf8', env
+    }).trim();
+    outputs.push(mappedOut);
+    assert.strictEqual(mappedOut, workDir);
+
+    const presetOut = execFileSync(wrapper, [powershell, '-NoProfile', '-Command', 'Write-Output $env:CLAUDE_CONFIG_DIR'], {
+      cwd: mapped, encoding: 'utf8', env: { ...env, CLAUDE_CONFIG_DIR: 'C:\\preset\\config' }
+    }).trim();
+    outputs.push(presetOut);
+    assert.strictEqual(presetOut, 'C:\\preset\\config', 'a preset config must win over routing');
+
+    let status = 0;
+    try {
+      execFileSync(wrapper, [powershell, '-NoProfile', '-Command', 'exit 23'], { cwd: mapped, env });
+    } catch (err) {
+      status = err.status;
+    }
+    assert.strictEqual(status, 23, 'the launcher must return Claude\'s exit code');
+  });
+}
+
+if (process.platform !== 'win32') {
 test('bash: profile-env.sh routes new processes per folder/env', async () => {
   const p = paths();
   const home = path.join(sandbox, 'home');
@@ -475,6 +560,7 @@ test('bash: claude-wrapper.sh execs the real binary with routed CLAUDE_CONFIG_DI
   assert.strictEqual(status, 127);
   assert.ok(stderrTxt.includes('claude-wrapper: expected'));
 });
+}
 
 test('backupLogins snapshots credentials for every live profile (600), prunes oldest', async () => {
   const p = paths();
@@ -487,12 +573,16 @@ test('backupLogins snapshots credentials for every live profile (600), prunes ol
   const defCreds = JSON.parse(await fs.readFile(path.join(first.dir, 'default', '.credentials.json'), 'utf8'));
   assert.strictEqual(defCreds.claudeAiOauth.accessToken, FAKE_TOKEN_A);
   assert.ok(fss.existsSync(path.join(first.dir, 'default', '.claude.json')));
-  assert.strictEqual(mode(path.join(first.dir, 'default', '.credentials.json')), 0o600);
+  if (process.platform !== 'win32') {
+    assert.strictEqual(mode(path.join(first.dir, 'default', '.credentials.json')), 0o600);
+  }
 
   // Work profile login captured
   const workCreds = JSON.parse(await fs.readFile(path.join(first.dir, 'Work', '.credentials.json'), 'utf8'));
   assert.strictEqual(workCreds.claudeAiOauth.accessToken, FAKE_TOKEN_B);
-  assert.strictEqual(mode(path.join(first.dir, 'Work', '.credentials.json')), 0o600);
+  if (process.platform !== 'win32') {
+    assert.strictEqual(mode(path.join(first.dir, 'Work', '.credentials.json')), 0o600);
+  }
 
   // Personal has no login files -> nothing snapshotted for it
   assert.ok(!fss.existsSync(path.join(first.dir, 'Personal')));
@@ -579,8 +669,10 @@ test('migrateToV2 converts a full v0.x tree (active profile becomes the default 
   const sMeta = JSON.parse(await fs.readFile(path.join(sdir, 'profile.json'), 'utf8'));
   assert.strictEqual(sMeta.name, 'Second-Account');
   assert.strictEqual(sMeta.schemaVersion, 2);
-  assert.strictEqual(mode(sdir), 0o700);
-  assert.strictEqual(mode(path.join(sdir, '.credentials.json')), 0o600);
+  if (process.platform !== 'win32') {
+    assert.strictEqual(mode(sdir), 0o700);
+    assert.strictEqual(mode(path.join(sdir, '.credentials.json')), 0o600);
+  }
 
   // legacy marker file removed; listProfiles now shows a clean v2 world
   assert.ok(!fss.existsSync(path.join(p.profilesRoot, 'active-profile.json')));
@@ -655,9 +747,11 @@ test('legacy restore: restoreBackup rebuilds the live default with a pre-restore
   assert.strictEqual(live.marker, 'backup-B');
   assert.strictEqual(live.userID, 'backup-B');
   assert.strictEqual(live.session, 'session-of-backup-B');
-  assert.strictEqual(mode(p.claudeDir), 0o700);
-  assert.strictEqual(mode(path.join(p.claudeDir, '.credentials.json')), 0o600);
-  assert.strictEqual(mode(p.claudeJson), 0o600);
+  if (process.platform !== 'win32') {
+    assert.strictEqual(mode(p.claudeDir), 0o700);
+    assert.strictEqual(mode(path.join(p.claudeDir, '.credentials.json')), 0o600);
+    assert.strictEqual(mode(p.claudeJson), 0o600);
+  }
 
   // a pre-restore safety backup captured the wrecked state first
   const safety = (await core.listBackups(p)).find(b => b.reason === 'pre-restore');

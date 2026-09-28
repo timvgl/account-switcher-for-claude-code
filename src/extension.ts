@@ -13,6 +13,8 @@ let statusBar: vscode.StatusBarItem;
 let output: vscode.OutputChannel;
 let wrapperPath: string | undefined;
 
+function isWindows(): boolean { return process.platform === 'win32'; }
+
 export function activate(context: vscode.ExtensionContext) {
   ctx = context;
   output = vscode.window.createOutputChannel('Claude Account Switcher');
@@ -40,7 +42,7 @@ export function activate(context: vscode.ExtensionContext) {
   void (async () => {
     try {
       const p = paths();
-      wrapperPath = await core.materializeHelperScripts(p, extensionVersion(), log);
+      wrapperPath = await materializeHelpers(p);
       await runMigration();
       watchRoutingFiles();
       const orphans = await core.findSwapOrphans(p);
@@ -90,6 +92,15 @@ function cfg() { return vscode.workspace.getConfiguration('claudeProfileSwitcher
 
 function extensionVersion(): string {
   return (ctx.extension.packageJSON as { version?: string }).version ?? '0.0.0';
+}
+
+function materializeHelpers(p: core.Paths): Promise<string> {
+  return core.materializeHelperScripts(p, extensionVersion(), log, {
+    platform: process.platform,
+    windowsWrapperSource: isWindows()
+      ? path.join(ctx.extensionPath, 'resources', 'windows', 'claude-wrapper.exe')
+      : undefined
+  });
 }
 
 function expandHome(p: string): string {
@@ -166,7 +177,7 @@ function configuredWrapper(): string {
  */
 async function ensureRoutingConfigured(interactive: boolean): Promise<boolean> {
   if (!wrapperPath) {
-    wrapperPath = await core.materializeHelperScripts(paths(), extensionVersion(), log);
+    wrapperPath = await materializeHelpers(paths());
   }
   const current = configuredWrapper();
   if (current === wrapperPath) { return true; }
@@ -179,7 +190,7 @@ async function ensureRoutingConfigured(interactive: boolean): Promise<boolean> {
   if (!interactive) { return false; }
   const pick = await vscode.window.showInformationMessage(
     'Enable per-folder account routing? This sets the official Claude extension\'s ' +
-    `"claudeCode.${OFFICIAL_WRAPPER_SETTING}" setting to a small script that picks the right account ` +
+    `"claudeCode.${OFFICIAL_WRAPPER_SETTING}" setting to a small launcher that picks the right account ` +
     'for each NEW chat. Running chats are never touched, and no account is ever logged out.',
     { modal: true, detail: `Wrapper: ${wrapperPath}` },
     'Enable');
@@ -293,7 +304,12 @@ async function pickFolder(): Promise<string | undefined> {
 async function officialClaudeBinary(): Promise<string | undefined> {
   const ext = vscode.extensions.getExtension(OFFICIAL_EXT_ID);
   if (!ext) { return undefined; }
-  const candidate = path.join(ext.extensionPath, 'resources', 'native-binary', 'claude');
+  const candidate = path.join(
+    ext.extensionPath,
+    'resources',
+    'native-binary',
+    isWindows() ? 'claude.exe' : 'claude'
+  );
   try { await fsp.access(candidate); return candidate; } catch { return undefined; }
 }
 

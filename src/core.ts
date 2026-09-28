@@ -370,11 +370,29 @@ export async function listMap(paths: Paths): Promise<MapEntry[]> {
     if (!t || t.startsWith('#')) { continue; }
     const sep = t.indexOf('|');
     if (sep <= 0) { continue; }
-    const prefix = t.slice(0, sep).trim().replace(/\/+$/, '');
+    const prefix = trimRouteSeparators(t.slice(0, sep).trim());
     const profile = t.slice(sep + 1).trim();
     if (prefix && profile) { out.push({ prefix, profile }); }
   }
   return out;
+}
+
+function trimRouteSeparators(dirPath: string): string {
+  const root = path.parse(dirPath).root;
+  return dirPath === root ? dirPath : dirPath.replace(/[\\/]+$/, '');
+}
+
+function normalizeRoutePath(dirPath: string): string {
+  return trimRouteSeparators(path.resolve(dirPath));
+}
+
+function pathIsAtOrBelow(target: string, prefix: string): boolean {
+  const relative = path.relative(prefix, target);
+  return relative === '' || (
+    relative !== '..' &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
 }
 
 async function writeMap(paths: Paths, entries: MapEntry[]): Promise<void> {
@@ -396,7 +414,7 @@ async function writeMap(paths: Paths, entries: MapEntry[]): Promise<void> {
 
 /** Route a folder to a profile. Routing to 'default' removes the entry. */
 export async function setMapping(paths: Paths, dirPath: string, profile: string): Promise<void> {
-  const prefix = path.resolve(dirPath).replace(/\/+$/, '');
+  const prefix = normalizeRoutePath(dirPath);
   const entries = (await listMap(paths)).filter(e => e.prefix !== prefix);
   if (!(await isDefaultName(paths, profile))) {
     await configDirFor(paths, profile); // throws for unknown profiles
@@ -406,7 +424,7 @@ export async function setMapping(paths: Paths, dirPath: string, profile: string)
 }
 
 export async function removeMapping(paths: Paths, dirPath: string): Promise<void> {
-  const prefix = path.resolve(dirPath).replace(/\/+$/, '');
+  const prefix = normalizeRoutePath(dirPath);
   await writeMap(paths, (await listMap(paths)).filter(e => e.prefix !== prefix));
 }
 
@@ -427,10 +445,10 @@ export async function resolveProfileForDir(paths: Paths, dirPath: string, homeDi
     if (d === homeDir || path.dirname(d) === d) { break; }
     d = path.dirname(d);
   }
-  const target = path.resolve(dirPath);
+  const target = normalizeRoutePath(dirPath);
   let best: MapEntry | undefined;
   for (const e of await listMap(paths)) {
-    if (target === e.prefix || target.startsWith(e.prefix + '/')) {
+    if (pathIsAtOrBelow(target, e.prefix)) {
       if (!best || e.prefix.length > best.prefix.length) { best = e; }
     }
   }
@@ -556,15 +574,59 @@ export function renderHelperScripts(paths: Paths, version: string): HelperScript
   return { profileEnv: fill(PROFILE_ENV_TEMPLATE), wrapper: fill(WRAPPER_TEMPLATE) };
 }
 
-/** Write _bin/profile-env.sh and _bin/claude-wrapper.sh (idempotent). Returns the wrapper path. */
-export async function materializeHelperScripts(paths: Paths, version: string, log: Logger = noop): Promise<string> {
-  const scripts = renderHelperScripts(paths, version);
+export type HelperPlatform = 'windows' | 'posix';
+
+export function helperPlatform(platform: NodeJS.Platform = process.platform): HelperPlatform {
+  return platform === 'win32' ? 'windows' : 'posix';
+}
+
+export function helperWrapperFileName(platform: NodeJS.Platform = process.platform): string {
+  return helperPlatform(platform) === 'windows' ? 'claude-wrapper.exe' : 'claude-wrapper.sh';
+}
+
+export interface HelperOptions {
+  /** Override for tests; production defaults to the host OS. */
+  platform?: NodeJS.Platform;
+  /** Bundled native Windows launcher, supplied by the VS Code extension. */
+  windowsWrapperSource?: string;
+}
+
+/**
+ * Write the host platform's routing helpers (idempotent). Linux and other
+ * POSIX hosts use Bash; Windows uses a native launcher because the official
+ * Claude extension can only spawn an executable from claudeProcessWrapper.
+ */
+export async function materializeHelperScripts(
+  paths: Paths,
+  version: string,
+  log: Logger = noop,
+  options: HelperOptions = {}
+): Promise<string> {
+  const platform = helperPlatform(options.platform);
   const bin = binRoot(paths);
   await ensureDir(paths.profilesRoot);
   await ensureDir(bin, 0o755);
+
+  if (platform === 'windows') {
+    if (!options.windowsWrapperSource) {
+      throw new Error('Windows routing launcher is missing from the extension package.');
+    }
+    const target = path.join(bin, helperWrapperFileName(options.platform));
+    const source = await fs.readFile(options.windowsWrapperSource);
+    const current = await fs.readFile(target).catch(() => undefined);
+    if (!current || !source.equals(current)) {
+      const tmp = `${target}.tmp-${crypto.randomBytes(4).toString('hex')}`;
+      await fs.writeFile(tmp, source);
+      await fs.rename(tmp, target);
+      log(`wrote ${target}`);
+    }
+    return target;
+  }
+
+  const scripts = renderHelperScripts(paths, version);
   const targets: Array<{ file: string; content: string; mode: number }> = [
     { file: path.join(bin, 'profile-env.sh'), content: scripts.profileEnv, mode: 0o644 },
-    { file: path.join(bin, 'claude-wrapper.sh'), content: scripts.wrapper, mode: 0o755 }
+    { file: path.join(bin, helperWrapperFileName(options.platform)), content: scripts.wrapper, mode: 0o755 }
   ];
   for (const t of targets) {
     const current = await fs.readFile(t.file, 'utf8').catch(() => undefined);
@@ -576,7 +638,7 @@ export async function materializeHelperScripts(paths: Paths, version: string, lo
     }
     await fs.chmod(t.file, t.mode).catch(() => undefined);
   }
-  return path.join(bin, 'claude-wrapper.sh');
+  return path.join(bin, helperWrapperFileName(options.platform));
 }
 
 // ---------------------------------------------------------------------------

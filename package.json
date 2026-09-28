@@ -2,7 +2,7 @@
   "name": "account-switcher-for-claude-code",
   "displayName": "Account Switcher for Claude Code",
   "description": "Use multiple Claude Code accounts at the same time in VS Code / code-server — every account stays logged in permanently, each folder/chat can run its own account, and switching never interrupts running sessions. Unofficial.",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "publisher": "faisalsannan",
   "license": "MIT",
   "author": "Faisal Sannan",
